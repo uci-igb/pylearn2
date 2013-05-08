@@ -267,7 +267,6 @@ class SGD(TrainingAlgorithm):
                 if np.any(np.isnan(update_val)):
                     raise ValueError("debug value of %s contains nans" % update.name)
 
-
         with log_timing(log, 'Compiling sgd_update'):
             if self.supervised:
                 fn_inputs = [X, Y]

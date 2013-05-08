@@ -266,7 +266,7 @@ class MLP(Layer):
 
 
     def get_params(self):
-
+        # Get parameters for each layer.
         rval = []
         for layer in self.layers:
             for param in layer.get_params():
@@ -327,8 +327,9 @@ class MLP(Layer):
     def get_weights_topo(self):
         return self.layers[0].get_weights_topo()
 
-    def dropout_fprop(self, state_below, default_input_include_prob=0.5, input_include_probs=None,
-        default_input_scale=2., input_scales=None):
+    def dropout_fprop(self, state_below, return_all = False, 
+                      default_input_include_prob=0.5, input_include_probs=None,
+                      default_input_scale=2., input_scales=None):
         """
         state_below: The input to the MLP
 
@@ -350,36 +351,108 @@ class MLP(Layer):
 
         if input_include_probs is None:
             input_include_probs = {}
-
+        
         if input_scales is None:
             input_scales = {}
-
+        
         assert all(layer_name in self.layer_names for layer_name in input_include_probs)
         assert all(layer_name in self.layer_names for layer_name in input_scales)
 
         theano_rng = MRG_RandomStreams(self.rng.randint(2**15))
 
+        statelist = []
         for layer in self.layers:
             layer_name = layer.layer_name
 
             if layer_name in input_include_probs:
                 include_prob = input_include_probs[layer_name]
             else:
+                warnings.warn("Using default_include_input_prob. It is better to specify.")
                 include_prob = default_input_include_prob
-
+                import pdb
+                pdb.set_trace()
+            
             if layer_name in input_scales:
                 scale = input_scales[layer_name]
             else:
+                warnings.warn("Using default_input_scale. It is better to specify.")
                 scale = default_input_scale
-
+            # Apply dropout and scale to layer input.
             state_below = self.apply_dropout(state=state_below,
                     include_prob=include_prob,
                     theano_rng=theano_rng,
                     scale=scale)
-
+            # Compute output of this layer.
             state_below = layer.fprop(state_below)
-
+            statelist.append(state_below)
+        
+        if return_all:
+            return statelist
         return state_below
+    
+    def dropin_fprop(self, state_below, return_all = False, 
+                      default_input_include_prob=0.5, input_include_probs=None,
+                      default_input_scale=2., input_scales=None):
+        """
+        state_below: The input to the MLP
+
+        This is a test of the dropIN idea. This function is copied and modified from dropout_fprop.
+
+        Each feature is also multiplied by a scale factor. The scale factor for each
+        layer's input scale is determined by the same scheme as the input probabilities.
+
+        """
+        if input_include_probs is None:
+            input_include_probs = {}
+        
+        if input_scales is None:
+            input_scales = {}
+        
+        assert all(layer_name in self.layer_names for layer_name in input_include_probs)
+        assert all(layer_name in self.layer_names for layer_name in input_scales)
+
+        theano_rng = MRG_RandomStreams(self.rng.randint(2**15))
+
+        statelist = []
+        for layer in self.layers:
+            layer_name = layer.layer_name
+
+            if layer_name in input_include_probs:
+                include_prob = input_include_probs[layer_name]
+            else:
+                warnings.warn("Using default_include_input_prob. It is better to specify.")
+                include_prob = default_input_include_prob
+                import pdb
+                pdb.set_trace()
+            
+            if layer_name in input_scales:
+                scale = input_scales[layer_name]
+            else:
+                warnings.warn("Using default_input_scale. It is better to specify.")
+                scale = default_input_scale
+            # Apply dropIN and scale to layer input.
+            state_below = self.apply_dropin(state=state_below,
+                    include_prob=include_prob,
+                    theano_rng=theano_rng,
+                    scale=scale)
+            # Compute output of this layer.
+            state_below = layer.fprop(state_below)
+            statelist.append(state_below)
+        
+        if return_all:
+            return statelist
+        return state_below
+
+    def apply_dropin(self, state, include_prob, scale, theano_rng):
+        if include_prob in [None, 1.0, 1]:
+            return state
+        assert scale is not None
+        if isinstance(state, tuple):
+            return tuple(self.apply_dropin(substate, include_prob, scale, theano_rng) for substate in state)
+        notdropped = theano_rng.binomial(p=include_prob, size=state.shape, dtype=state.dtype)
+        return (state * notdropped + (notdropped * -1.0 + 1.0)) * scale
+
+
 
     def fprop(self, state_below, return_all = False):
 
@@ -530,7 +603,7 @@ class Softmax(Layer):
             assert self.desired_space == self.input_space
 
         rng = self.mlp.rng
-
+        
         if self.no_affine:
             self._params = []
         else:
@@ -753,6 +826,7 @@ class SoftmaxPool(Layer):
 
         rng = self.mlp.rng
         if self.irange is not None:
+            # Weights initialized from uniform distribution.
             assert self.sparse_init is None
             W = rng.uniform(-self.irange,
                             self.irange,
@@ -760,6 +834,7 @@ class SoftmaxPool(Layer):
                 (rng.uniform(0.,1., (self.input_dim, self.detector_layer_dim))
                  < self.include_prob)
         else:
+            # Sparse weights initialized from N(0,sparse_stdev).
             assert self.sparse_init is not None
             W = np.zeros((self.input_dim, self.detector_layer_dim))
             def mask_rejects(idx, i):
@@ -801,6 +876,7 @@ class SoftmaxPool(Layer):
                 updates[W] = updates[W] * self.mask
 
         if self.max_col_norm is not None:
+            # Scale input weight vector.
             W ,= self.transformer.get_params()
             if W in updates:
                 updated_W = updates[W]
@@ -1286,6 +1362,7 @@ class Linear(Layer):
         self.output_space = VectorSpace(self.dim + self.copy_input * self.input_dim)
 
         rng = self.mlp.rng
+
         if self.irange is not None:
             assert self.istdev is None
             assert self.sparse_init is None
@@ -1452,7 +1529,8 @@ class Linear(Layer):
 
         rval['max_x_max_u'] = mx.max()
         rval['max_x_mean_u'] = mx.mean()
-        rval['max_x_min_u'] = mx.min()
+        rval['max_x_min_u']  = mx.min()
+        rval['max_x_std_u']  = mx.std()
 
         rval['mean_x_max_u'] = mean.max()
         rval['mean_x_mean_u'] = mean.mean()
@@ -1461,6 +1539,7 @@ class Linear(Layer):
         rval['min_x_max_u'] = mn.max()
         rval['min_x_mean_u'] = mn.mean()
         rval['min_x_min_u'] = mn.min()
+
 
         return rval
 
