@@ -167,6 +167,12 @@ class MLP(Layer):
 
         if seed is None:
             seed = [2013, 1, 4]
+        elif isinstance(seed, str):
+            #Converts string to chars, chars to ints, then concatenates dec representation to int.
+            print 'Seed from str %s' % seed
+            seed = int(''.join(map(str, map(ord, list(seed)))))
+            seed = np.mod(seed, 10000) # Can't be too big.
+            seed = [seed] # Must be list
 
         self.seed = seed
         self.setup_rng()
@@ -452,6 +458,46 @@ class MLP(Layer):
         notdropped = theano_rng.binomial(p=include_prob, size=state.shape, dtype=state.dtype)
         return (state * notdropped + (notdropped * -1.0 + 1.0)) * scale
 
+    def addgauss_fprop(self, state_below, input_noise_stdev):
+        """
+        state_below: The input to the MLP
+        Returns the output of the MLP, when applying additive Gaussian noise to the
+        input and intermediate layers.
+        """
+        warnings.warn("addgauss should be implemented with fixed_var_descr to"
+                " make sure it works with BGD, this is just a hack to get it"
+                "working with SGD")
+        
+        assert all(layer_name in self.layer_names for layer_name in input_noise_stdev)
+
+        theano_rng = MRG_RandomStreams(self.rng.randint(2**15))
+
+        #statelist = []
+        for layer in self.layers:
+            layer_name = layer.layer_name            
+
+            if layer_name in input_noise_stdev:
+                noise_stdev = input_noise_stdev[layer_name]
+            else:
+                noise_stdev = 0.0 # Default to no noise.
+            
+            # Apply additive gaussian noise.
+            state_below = self.apply_addgauss(
+                    state=state_below,
+                    noise_stdev=noise_stdev,
+                    theano_rng=theano_rng)
+            # Compute output of this layer.
+            state_below = layer.fprop(state_below)
+            #statelist.append(state_below)
+        #if return_all:
+        #    return statelist
+        return state_below
+ 
+    def apply_addgauss(self, state, noise_stdev, theano_rng):
+        if noise_stdev == 0.0:
+            return state
+        #return state * theano_rng.binomial(p=include_prob, size=state.shape, dtype=state.dtype) * scale
+        return state + theano_rng.normal(size=state.shape, std=noise_stdev, dtype=state.dtype)
 
 
     def fprop(self, state_below, return_all = False):
@@ -496,12 +542,17 @@ class MLP(Layer):
 
 class Softmax(Layer):
 
-    def __init__(self, n_classes, layer_name, irange = None,
-            istdev = None,
-                 sparse_init = None, W_lr_scale = None,
-                 b_lr_scale = None, max_row_norm = None,
+    def __init__(self, n_classes, layer_name,
+                 irange = None,
+                 istdev = None,
+                 sparse_init = None,
+                 W_lr_scale = None,
+                 b_lr_scale = None,
+                 max_row_norm = None,
                  no_affine = False,
-                 max_col_norm = None, init_bias_target_marginals= None):
+                 mask_weights = None,
+                 max_col_norm = None,
+                 init_bias_target_marginals= None):
         """
         """
 
@@ -615,17 +666,39 @@ class Softmax(Layer):
                 assert self.sparse_init is None
                 W = rng.randn(self.input_dim, self.n_classes) * self.istdev
             else:
+                #assert self.sparse_init is not None
+                #W = np.zeros((self.input_dim, self.n_classes))
+                #for i in xrange(self.n_classes):
+                #    for j in xrange(self.sparse_init):
+                #        idx = rng.randint(0, self.input_dim)
+                #        while W[idx, i] != 0.:
+                #            idx = rng.randint(0, self.input_dim)
+                #        W[idx, i] = rng.randn()
+                # Copied following from Linear to replace above.
                 assert self.sparse_init is not None
                 W = np.zeros((self.input_dim, self.n_classes))
+                def mask_rejects(idx, i):
+                    if self.mask_weights is None:
+                        return False
+                    return self.mask_weights[idx, i] == 0.
                 for i in xrange(self.n_classes):
+                    assert self.sparse_init <= self.input_dim
                     for j in xrange(self.sparse_init):
                         idx = rng.randint(0, self.input_dim)
-                        while W[idx, i] != 0.:
+                        while W[idx, i] != 0 or mask_rejects(idx, i):
                             idx = rng.randint(0, self.input_dim)
                         W[idx, i] = rng.randn()
+                #W *= self.sparse_stdev # No sparse_stdev in softmax.
+
+            # Check that mask_weights argument is valid.
+            if self.mask_weights is not None:
+                expected_shape =  (self.input_dim, self.n_classes)
+                if expected_shape != self.mask_weights.shape:
+                    raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
+                self.mask = sharedX(self.mask_weights)
+                W = W * self.mask_weights
 
             self.W = sharedX(W,  'softmax_W' )
-
             self._params = [ self.b, self.W ]
 
     def get_weights_topo(self):
@@ -733,6 +806,16 @@ class Softmax(Layer):
     def censor_updates(self, updates):
         if self.no_affine:
             return
+        
+        # Censor updates of masked weights.
+        if not hasattr(self, 'mask_weights'):
+            # Patch old pickle files.
+            self.mask_weights = None
+        if self.mask_weights is not None:
+            W = self.W
+            if W in updates:
+                updates[W] = updates[W] * self.mask
+        
         if self.max_row_norm is not None:
             W = self.W
             if W in updates:
@@ -849,6 +932,12 @@ class SoftmaxPool(Layer):
                         idx = rng.randint(0, self.input_dim)
                     W[idx, i] = rng.randn()
             W *= self.sparse_stdev
+        if self.mask_weights is not None:
+            expected_shape =  (self.input_dim, self.detector_layer_dim)
+            if expected_shape != self.mask_weights.shape:
+                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
+            self.mask = sharedX(self.mask_weights)
+            W = W * self.mask_weights
 
         W = sharedX(W)
         W.name = self.layer_name + '_W'
@@ -858,11 +947,7 @@ class SoftmaxPool(Layer):
         W ,= self.transformer.get_params()
         assert W.name is not None
 
-        if self.mask_weights is not None:
-            expected_shape =  (self.input_dim, self.detector_layer_dim)
-            if expected_shape != self.mask_weights.shape:
-                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
-            self.mask = sharedX(self.mask_weights)
+
 
     def censor_updates(self, updates):
 
@@ -1142,6 +1227,12 @@ class RectifiedLinear(Layer):
                         idx = rng.randint(0, self.input_dim)
                     W[idx, i] = rng.randn()
             W *= self.sparse_stdev
+        if self.mask_weights is not None:
+            expected_shape =  (self.input_dim, self.dim)
+            if expected_shape != self.mask_weights.shape:
+                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
+            self.mask = sharedX(self.mask_weights)
+            W = W * self.mask_weights
 
         W = sharedX(W)
         W.name = self.layer_name + '_W'
@@ -1150,12 +1241,6 @@ class RectifiedLinear(Layer):
 
         W ,= self.transformer.get_params()
         assert W.name is not None
-
-        if self.mask_weights is not None:
-            expected_shape =  (self.input_dim, self.dim)
-            if expected_shape != self.mask_weights.shape:
-                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
-            self.mask = sharedX(self.mask_weights)
 
     def censor_updates(self, updates):
 
@@ -1389,6 +1474,12 @@ class Linear(Layer):
                         idx = rng.randint(0, self.input_dim)
                     W[idx, i] = rng.randn()
             W *= self.sparse_stdev
+        if self.mask_weights is not None:
+            expected_shape =  (self.input_dim, self.dim)
+            if expected_shape != self.mask_weights.shape:
+                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
+            self.mask = sharedX(self.mask_weights)
+            W = W * self.mask_weights
 
         W = sharedX(W)
         W.name = self.layer_name + '_W'
@@ -1398,11 +1489,7 @@ class Linear(Layer):
         W ,= self.transformer.get_params()
         assert W.name is not None
 
-        if self.mask_weights is not None:
-            expected_shape =  (self.input_dim, self.dim)
-            if expected_shape != self.mask_weights.shape:
-                raise ValueError("Expected mask with shape "+str(expected_shape)+" but got "+str(self.mask_weights.shape))
-            self.mask = sharedX(self.mask_weights)
+        
 
     def censor_updates(self, updates):
 
@@ -1470,6 +1557,7 @@ class Linear(Layer):
             Z = np.exp(W).sum(axis=0)
             rval =  P / Z
             return rval
+        return W
 
     def set_weights(self, weights):
         W, = self.transformer.get_params()
@@ -1540,6 +1628,14 @@ class Linear(Layer):
         rval['min_x_mean_u'] = mn.mean()
         rval['min_x_min_u'] = mn.min()
 
+        sparsity_analysis = False # Don't want unnecessary computation.
+        if sparsity_analysis:
+            # Compute statistics for absolute value. Used in tanh dropout analysis.
+            abs = np.abs(state)
+            abs_mean = np.mean(abs, axis=0)
+            rval['abs_mean_x_max_u'] = abs_mean.max()
+            rval['abs_mean_x_mean_u'] = abs_mean.mean()
+            rval['abs_mean_x_min_u'] = abs_mean.min()
 
         return rval
 
