@@ -6,7 +6,7 @@ import numpy as np
 #import pickle as pkl
 
 datapath = '~/improver2013/out/'
-datapath = '~/ml/improver2013/improver2013/out/'
+datapath = '/home/pjsadows/ml/improver2013/improver2013/out/'
 
 def converter(x):
     if x == 'NA':
@@ -33,10 +33,8 @@ class IMPROVER2013(dense_design_matrix.DenseDesignMatrix):
             y = np.loadtxt(fin_y, skiprows=1, dtype='float32')
         elif which_set == 'A_phospho' or which_set == 'A_human_phospho_from_rat_phospho_replicate':
             # Input is rat A phospho, output is human A phospho.
-            #fin_X = open(datapath + 'SBV_STC_subchallenge2/training.data/GEx_rat_train.txt.output', 'r')
-            fin_X = open(datapath + 'SBV_STC_subchallenge2/transformed/GEx_rat_train.txt.output', 'r')
-            #fin_y = open(datapath + 'SBV_STC_subchallenge2/training.data/GEx_human_train.txt.output', 'r') 
-            fin_y = open(datapath + 'SBV_STC_subchallenge2/transformed/GEx_human_train.txt.output', 'r') 
+            fin_X = open(datapath + 'SBV_STC_subchallenge2/training.data/GEx_rat_train.txt.output', 'r')
+            fin_y = open(datapath + 'SBV_STC_subchallenge2/training.data/GEx_human_train.txt.output', 'r') 
             X = np.loadtxt(fin_X, skiprows=1, usecols=range(1,33), dtype='float32')
             y = np.loadtxt(fin_y, skiprows=1, usecols=range(1,33), dtype='float32')
             #y = np.zeros((X.shape[0], 1))
