@@ -6,7 +6,7 @@ import numpy as np
 #import pickle as pkl
 
 datapath = '~/improver2013/out/'
-datapath = '/home/pjsadows/ml/improver2013/improver2013/out/'
+#datapath = '/home/pjsadows/ml/improver2013/improver2013/out/'
 
 def converter(x):
     if x == 'NA':
